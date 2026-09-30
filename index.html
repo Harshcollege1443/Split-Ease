@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SplitEase — Roommate Expense Splitter</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#f4f6fb;--surface:#ffffff;--surface2:#f8fafc;
+  --border:#e2e8f0;--border2:#cbd5e1;
+  --text:#0f172a;--text2:#475569;--text3:#94a3b8;
+  --primary:#6366f1;--primary-light:#eef2ff;--primary-dark:#4338ca;
+  --green:#10b981;--green-light:#ecfdf5;
+  --red:#ef4444;--red-light:#fef2f2;
+  --amber:#f59e0b;--amber-light:#fffbeb;
+  --blue:#3b82f6;--blue-light:#eff6ff;
+  --pink:#ec4899;--pink-light:#fdf2f8;
+  --purple:#8b5cf6;--purple-light:#f5f3ff;
+  --radius:12px;--shadow:0 1px 3px rgba(0,0,0,0.06),0 4px 16px rgba(0,0,0,0.04);
+  --shadow-md:0 4px 6px rgba(0,0,0,0.05),0 10px 30px rgba(0,0,0,0.08);
+}
+html{font-size:16px}
+body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh;-webkit-font-smoothing:antialiased}
+#root{min-height:100vh}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:10px}
+input,select,textarea{font-family:inherit}
+button{font-family:inherit;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ── CONSTANTS ──────────────────────────────────────────────────────────
+const LEGACY_CATEGORIES = [
+  { id:'rent',     label:'Rent',       emoji:'🏠', color:'#6366f1' },
+  { id:'food',     label:'Food',       emoji:'🍕', color:'#f59e0b' },
+  { id:'utilities',label:'Utilities',  emoji:'💡', color:'#3b82f6' },
+  { id:'groceries',label:'Groceries',  emoji:'🛒', color:'#10b981' },
+  { id:'transport',label:'Transport',  emoji:'🚗', color:'#8b5cf6' },
+  { id:'internet', label:'Internet',   emoji:'📶', color:'#ec4899' },
+  { id:'other',    label:'Other',      emoji:'📦', color:'#94a3b8' },
+];
+
+const ROOMMATE_COLORS = ['#6366f1','#10b981','#f59e0b','#ec4899','#3b82f6','#8b5cf6'];
+const ROOMMATE_BG     = ['#eef2ff','#ecfdf5','#fffbeb','#fdf2f8','#eff6ff','#f5f3ff'];
+
+const DEFAULT_ROOMMATES = [
+  { id:'r1', name:'Nitin',  color:'#6366f1', bg:'#eef2ff' },
+  { id:'r2', name:'Rahul',  color:'#10b981', bg:'#ecfdf5' },
+  { id:'r3', name:'Priya',  color:'#f59e0b', bg:'#fffbeb' },
+];
+
+const DEFAULT_EXPENSES = [
+  { id:'e1', desc:'Monthly Rent', amount:15000, category:'rent',      paidBy:'r1', splitMethod:'equal', participants:['r1','r2','r3'], splits:{}, date:'2025-01-01', note:'' },
+  { id:'e2', desc:'Electricity',  amount:1200,  category:'utilities', paidBy:'r2', splitMethod:'equal', participants:['r1','r2','r3'], splits:{}, date:'2025-01-03', note:'' },
+  { id:'e3', desc:'Groceries',    amount:3500,  category:'groceries', paidBy:'r1', splitMethod:'equal', participants:['r1','r2','r3'], splits:{}, date:'2025-01-05', note:'Big monthly shop' },
+  { id:'e4', desc:'WiFi Bill',    amount:800,   category:'internet',  paidBy:'r3', splitMethod:'equal', participants:['r1','r2','r3'], splits:{}, date:'2025-01-06', note:'' },
+  { id:'e5', desc:'Pizza Night',  amount:960,   category:'food',      paidBy:'r2', splitMethod:'equal', participants:['r1','r2','r3'], splits:{}, date:'2025-01-08', note:'' },
+  { id:'e6', desc:'Uber ride',    amount:450,   category:'transport', paidBy:'r1', splitMethod:'equal', participants:['r2','r3'],      splits:{}, date:'2025-01-09', note:'' },
+];
+
+// ── HELPERS ─────────────────────────────────────────────────────────────
+const fmtINR = n => '₹' + Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits:0, maximumFractionDigits:0 });
+const uid = () => 'id_' + Math.random().toString(36).slice(2,9);
+const getCat = id => LEGACY_CATEGORIES.find(c => c.id === id) || {
+  id,
+  label: String(id || 'Other').replace(/\b\w/g, char => char.toUpperCase()),
+  emoji: '📦',
+  color: '#94a3b8',
+};
+const getRoommate = (roommates, id) => roommates.find(r => r.id === id);
+
+// Compute net balances from expenses
+function computeBalances(expenses, roommates) {
+  const bal = {};
+  roommates.forEach(r => bal[r.id] = 0);
+
+  expenses.forEach(exp => {
+    const { amount, paidBy, splitMethod, participants, splits } = exp;
+    if (!participants || participants.length === 0) return;
+
+    // What each participant owes
+    let owed = {};
+    if (splitMethod === 'equal') {
+      const share = amount / participants.length;
+      participants.forEach(p => owed[p] = share);
+    } else if (splitMethod === 'percentage') {
+      participants.forEach(p => owed[p] = (amount * (splits[p] || 0)) / 100);
+    } else { // custom
+      participants.forEach(p => owed[p] = splits[p] || 0);
+    }
+
+    // Payer gets credited, others get debited
+    participants.forEach(p => {
+      if (p === paidBy) {
+        bal[paidBy] = (bal[paidBy] || 0) + (amount - owed[p]);
+      } else {
+        bal[p] = (bal[p] || 0) - owed[p];
+        bal[paidBy] = (bal[paidBy] || 0) + owed[p];
+      }
+    });
+  });
+
+  return bal;
+}
+
+// Minimum transactions settlement algorithm
+function simplifyDebts(balances) {
+  const pos = [], neg = [];
+  Object.entries(balances).forEach(([id, amt]) => {
+    if (amt > 0.01) pos.push({ id, amt });
+    else if (amt < -0.01) neg.push({ id, amt: -amt });
+  });
+
+  pos.sort((a,b) => b.amt - a.amt);
+  neg.sort((a,b) => b.amt - a.amt);
+
+  const transactions = [];
+  let i = 0, j = 0;
+  while (i < pos.length && j < neg.length) {
+    const settle = Math.min(pos[i].amt, neg[j].amt);
+    transactions.push({ from: neg[j].id, to: pos[i].id, amount: settle });
+    pos[i].amt -= settle;
+    neg[j].amt -= settle;
+    if (pos[i].amt < 0.01) i++;
+    if (neg[j].amt < 0.01) j++;
+  }
+  return transactions;
+}
+
+// ── AVATAR ───────────────────────────────────────────────────────────────
+function Avatar({ roommate, size = 32 }) {
+  if (!roommate) return null;
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: '50%',
+      background: roommate.bg || '#eef2ff',
+      border: `2px solid ${roommate.color}`,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      fontSize: size * 0.38, fontWeight: 600, color: roommate.color,
+      flexShrink: 0, letterSpacing: '-0.02em',
+    }}>
+      {roommate.name.slice(0,2).toUpperCase()}
+    </div>
+  );
+}
+
+// ── CARD ─────────────────────────────────────────────────────────────────
+function Card({ children, style = {}, className = '' }) {
+  return (
+    <div style={{
+      background: 'var(--surface)', borderRadius: 'var(--radius)',
+      boxShadow: 'var(--shadow)', border: '1px solid var(--border)',
+      ...style
+    }}>
+      {children}
+    </div>
+  );
+}
+
+// ── BADGE ────────────────────────────────────────────────────────────────
+function Badge({ label, color, bg, emoji }) {
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      background: bg, color, fontSize: 11, fontWeight: 500,
+      padding: '3px 8px', borderRadius: 20, whiteSpace: 'nowrap',
+    }}>
+      {emoji && <span>{emoji}</span>}
+      {label}
+    </span>
+  );
+}
+
+// ── SUMMARY CARDS ─────────────────────────────────────────────────────────
+function SummaryCards({ expenses, roommates }) {
+  const total = expenses.reduce((s,e) => s + e.amount, 0);
+  const balances = computeBalances(expenses, roommates);
+  const txns = simplifyDebts(balances);
+  const myShare = total / Math.max(roommates.length, 1);
+
+  const cards = [
+    { label: 'Total Expenses', value: fmtINR(total), sub: `${expenses.length} bills logged`, color: 'var(--primary)', bg: 'var(--primary-light)', icon: '💸' },
+    { label: 'Your Share', value: fmtINR(myShare), sub: 'avg per person', color: 'var(--blue)', bg: 'var(--blue-light)', icon: '👤' },
+    { label: 'Settlements', value: txns.length, sub: txns.length === 1 ? '1 payment needed' : `${txns.length} payments needed`, color: 'var(--green)', bg: 'var(--green-light)', icon: '✅' },
+    { label: 'This Month', value: fmtINR(total), sub: new Date().toLocaleString('default',{month:'long',year:'numeric'}), color: 'var(--amber)', bg: 'var(--amber-light)', icon: '📅' },
+  ];
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14 }}>
+      {cards.map((c,i) => (
+        <Card key={i} style={{ padding: '20px 18px' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--text2)', fontWeight: 500, marginBottom: 6 }}>{c.label}</div>
+              <div style={{ fontSize: 26, fontWeight: 700, color: c.color, lineHeight: 1, letterSpacing: '-0.02em' }}>{c.value}</div>
+              <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 5 }}>{c.sub}</div>
+            </div>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: c.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>
+              {c.icon}
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// ── DONUT CHART (category breakdown) ─────────────────────────────────────
+function CategoryChart({ expenses }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+
+  const data = useMemo(() => {
+    const totals = {};
+    expenses.forEach(e => {
+      totals[e.category] = (totals[e.category] || 0) + e.amount;
+    });
+    return Object.entries(totals).map(([id, total]) => ({ ...getCat(id), total }));
+  }, [expenses]);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    if (chartRef.current) chartRef.current.destroy();
+
+    chartRef.current = new Chart(canvasRef.current, {
+      type: 'doughnut',
+      data: {
+        labels: data.map(d => d.label),
+        datasets: [{
+          data: data.map(d => d.total),
+          backgroundColor: data.map(d => d.color),
+          borderColor: '#fff',
+          borderWidth: 3,
+          hoverBorderWidth: 3,
+          hoverOffset: 6,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        cutout: '68%',
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => ` ${ctx.label}: ${fmtINR(ctx.parsed)}`
+            },
+            backgroundColor: '#0f172a',
+            titleColor: '#fff',
+            bodyColor: '#cbd5e1',
+            padding: 10,
+            cornerRadius: 8,
+          }
+        }
+      }
+    });
+    return () => { if (chartRef.current) chartRef.current.destroy(); };
+  }, [data]);
+
+  const total = data.reduce((s,d) => s + d.total, 0);
+
+  return (
+    <Card style={{ padding: 20 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Spending by Category</div>
+      <div style={{ position: 'relative', maxWidth: 200, margin: '0 auto 16px' }}>
+        <canvas ref={canvasRef}></canvas>
+        <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', textAlign: 'center' }}>
+          <div style={{ fontSize: 11, color: 'var(--text3)' }}>Total</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)', marginTop: 2 }}>{fmtINR(total)}</div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {data.map(d => (
+          <div key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ width: 10, height: 10, borderRadius: 3, background: d.color, flexShrink: 0 }}></div>
+            <span style={{ fontSize: 12, color: 'var(--text2)', flex: 1 }}>{d.emoji} {d.label}</span>
+            <span style={{ fontSize: 12, fontWeight: 600 }}>{fmtINR(d.total)}</span>
+            <span style={{ fontSize: 11, color: 'var(--text3)', minWidth: 36, textAlign: 'right' }}>
+              {total ? Math.round(d.total/total*100) : 0}%
+            </span>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// ── BAR CHART (per-person spending) ──────────────────────────────────────
+function PersonChart({ expenses, roommates }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+
+  const data = useMemo(() => {
+    const paid = {}, owed = {};
+    roommates.forEach(r => { paid[r.id] = 0; owed[r.id] = 0; });
+    expenses.forEach(e => {
+      paid[e.paidBy] = (paid[e.paidBy] || 0) + e.amount;
+      const share = e.amount / Math.max((e.participants || []).length, 1);
+      (e.participants || []).forEach(p => { owed[p] = (owed[p] || 0) + share; });
+    });
+    return roommates.map(r => ({ name: r.name, paid: paid[r.id] || 0, owed: owed[r.id] || 0, color: r.color }));
+  }, [expenses, roommates]);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    if (chartRef.current) chartRef.current.destroy();
+
+    chartRef.current = new Chart(canvasRef.current, {
+      type: 'bar',
+      data: {
+        labels: data.map(d => d.name),
+        datasets: [
+          {
+            label: 'Paid',
+            data: data.map(d => d.paid),
+            backgroundColor: data.map(d => d.color),
+            borderRadius: 6,
+            borderSkipped: false,
+          },
+          {
+            label: 'Owes',
+            data: data.map(d => d.owed),
+            backgroundColor: data.map(d => d.color + '44'),
+            borderRadius: 6,
+            borderSkipped: false,
+            borderWidth: 2,
+            borderColor: data.map(d => d.color),
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: {
+          legend: {
+            position: 'top',
+            labels: { font: { size: 11, family: 'Inter' }, padding: 12, usePointStyle: true, pointStyleWidth: 8 }
+          },
+          tooltip: {
+            callbacks: { label: ctx => ` ${ctx.dataset.label}: ${fmtINR(ctx.parsed.y)}` },
+            backgroundColor: '#0f172a', titleColor: '#fff', bodyColor: '#cbd5e1', padding: 10, cornerRadius: 8,
+          }
+        },
+        scales: {
+          y: { ticks: { callback: v => fmtINR(v), font: { size: 10 } }, grid: { color: '#f1f5f9' } },
+          x: { ticks: { font: { size: 12 } }, grid: { display: false } }
+        }
+      }
+    });
+    return () => { if (chartRef.current) chartRef.current.destroy(); };
+  }, [data]);
+
+  return (
+    <Card style={{ padding: 20 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Paid vs Owes — Per Person</div>
+      <canvas ref={canvasRef} height={200}></canvas>
+    </Card>
+  );
+}
+
+// ── BALANCES PANEL ────────────────────────────────────────────────────────
+function BalancesPanel({ expenses, roommates }) {
+  const balances = computeBalances(expenses, roommates);
+
+  return (
+    <Card style={{ padding: 20 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Net Balances</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {roommates.map(r => {
+          const bal = balances[r.id] || 0;
+          const isPos = bal >= 0;
+          return (
+            <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Avatar roommate={r} size={36} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{r.name}</div>
+                <div style={{
+                  height: 5, borderRadius: 10, background: 'var(--border)',
+                  marginTop: 4, overflow: 'hidden',
+                }}>
+                  <div style={{
+                    height: '100%', borderRadius: 10,
+                    background: isPos ? 'var(--green)' : 'var(--red)',
+                    width: '60%',
+                  }}></div>
+                </div>
+              </div>
+              <div style={{
+                fontSize: 13, fontWeight: 700,
+                color: isPos ? 'var(--green)' : 'var(--red)',
+                minWidth: 80, textAlign: 'right',
+              }}>
+                {isPos ? '+' : '-'}{fmtINR(Math.abs(bal))}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text3)', minWidth: 60, textAlign: 'right' }}>
+                {isPos ? 'gets back' : 'owes'}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// ── SETTLEMENT PANEL ──────────────────────────────────────────────────────
+function SettlementPanel({ expenses, roommates }) {
+  const balances = computeBalances(expenses, roommates);
+  const txns = simplifyDebts(balances);
+  const [settled, setSettled] = useState([]);
+
+  const toggle = id => setSettled(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
+
+  return (
+    <Card style={{ padding: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>Settlement Plan</div>
+        <Badge label={`${txns.length - settled.length} remaining`} color="var(--primary)" bg="var(--primary-light)" />
+      </div>
+
+      {txns.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text3)' }}>
+          <div style={{ fontSize: 32, marginBottom: 10 }}>🎉</div>
+          <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--green)' }}>All settled up!</div>
+          <div style={{ fontSize: 12, marginTop: 4 }}>No payments needed right now.</div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {txns.map((t, i) => {
+            const from = getRoommate(roommates, t.from);
+            const to = getRoommate(roommates, t.to);
+            const done = settled.includes(i);
+            return (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '12px 14px', borderRadius: 10,
+                background: done ? 'var(--green-light)' : 'var(--bg)',
+                border: `1px solid ${done ? 'var(--green)' : 'var(--border)'}`,
+                opacity: done ? 0.7 : 1, transition: 'all 0.25s',
+              }}>
+                <Avatar roommate={from} size={32} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 500 }}>
+                    <span style={{ color: from?.color }}>{from?.name}</span>
+                    <span style={{ color: 'var(--text3)', margin: '0 6px' }}>pays</span>
+                    <span style={{ color: to?.color }}>{to?.name}</span>
+                  </div>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)', marginTop: 1 }}>
+                    {fmtINR(t.amount)}
+                  </div>
+                </div>
+                <Avatar roommate={to} size={32} />
+                <button
+                  onClick={() => toggle(i)}
+                  style={{
+                    marginLeft: 8, padding: '6px 14px', borderRadius: 8, border: 'none',
+                    background: done ? 'var(--green)' : 'var(--primary)',
+                    color: '#fff', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  {done ? '✓ Done' : 'Mark Done'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {txns.length > 0 && (
+        <div style={{ marginTop: 14, padding: 12, background: 'var(--primary-light)', borderRadius: 10 }}>
+          <div style={{ fontSize: 12, color: 'var(--primary)', fontWeight: 500 }}>
+            💡 Only {txns.length} payment{txns.length > 1 ? 's' : ''} needed to settle all debts (minimum transactions algorithm)
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── ADD EXPENSE MODAL ─────────────────────────────────────────────────────
+function AddExpenseModal({ roommates, onAdd, onClose }) {
+  const [desc, setDesc] = useState('');
+  const [amount, setAmount] = useState('');
+  const [category, setCategory] = useState('');
+  const [paidBy, setPaidBy] = useState(roommates[0]?.id || '');
+  const [splitMethod, setSplitMethod] = useState('equal');
+  const [participants, setParticipants] = useState(roommates.map(r => r.id));
+  const [splits, setSplits] = useState({});
+  const [note, setNote] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().slice(0,10));
+  const [error, setError] = useState('');
+
+  const toggleParticipant = id => {
+    setParticipants(p =>
+      p.includes(id) ? (p.length > 1 ? p.filter(x => x !== id) : p) : [...p, id]
+    );
+  };
+
+  const totalCustom = useMemo(() => {
+    if (splitMethod !== 'custom') return 0;
+    return participants.reduce((s, p) => s + (parseFloat(splits[p]) || 0), 0);
+  }, [splits, participants, splitMethod]);
+
+  const totalPct = useMemo(() => {
+    if (splitMethod !== 'percentage') return 0;
+    return participants.reduce((s, p) => s + (parseFloat(splits[p]) || 0), 0);
+  }, [splits, participants, splitMethod]);
+
+  const handleSubmit = () => {
+    setError('');
+    if (!desc.trim()) return setError('Add a description');
+    if (!amount || parseFloat(amount) <= 0) return setError('Enter a valid amount');
+    if (!category.trim()) return setError('Add a category');
+    if (participants.length === 0) return setError('Select at least one participant');
+    if (splitMethod === 'percentage' && Math.abs(totalPct - 100) > 0.5) return setError(`Percentages must add up to 100% (currently ${totalPct.toFixed(1)}%)`);
+    if (splitMethod === 'custom' && Math.abs(totalCustom - parseFloat(amount)) > 1) return setError(`Custom amounts must add up to ${fmtINR(parseFloat(amount))} (currently ${fmtINR(totalCustom)})`);
+
+    onAdd({
+      id: uid(), desc: desc.trim(), amount: parseFloat(amount), category: category.trim(),
+      paidBy, splitMethod, participants,
+      splits: splitMethod === 'equal' ? {} : splits,
+      note: note.trim(), date,
+    });
+  };
+
+  const inputStyle = {
+    width: '100%', padding: '10px 12px', borderRadius: 8,
+    border: '1.5px solid var(--border)', background: 'var(--surface)',
+    fontSize: 14, color: 'var(--text)', outline: 'none',
+    transition: 'border-color 0.2s',
+  };
+  const labelStyle = { fontSize: 12, fontWeight: 600, color: 'var(--text2)', marginBottom: 6, display: 'block' };
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 1000, padding: 16, backdropFilter: 'blur(4px)',
+    }} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{
+        background: 'var(--surface)', borderRadius: 16, width: '100%', maxWidth: 520,
+        maxHeight: '90vh', overflow: 'auto', boxShadow: 'var(--shadow-md)',
+      }}>
+        {/* Header */}
+        <div style={{ padding: '20px 24px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>Add Expense</div>
+            <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 2 }}>Log a shared bill or payment</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'var(--bg)', border: 'none', width: 32, height: 32, borderRadius: 8, fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>×</button>
+        </div>
+
+        <div style={{ padding: '16px 24px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Desc + Amount row */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 130px', gap: 12 }}>
+            <div>
+              <label style={labelStyle}>Description</label>
+              <input style={inputStyle} placeholder="e.g. Monthly Rent" value={desc} onChange={e => setDesc(e.target.value)} onFocus={e => e.target.style.borderColor='var(--primary)'} onBlur={e => e.target.style.borderColor='var(--border)'} />
+            </div>
+            <div>
+              <label style={labelStyle}>Amount (₹)</label>
+              <input style={{ ...inputStyle, fontFamily: 'JetBrains Mono, monospace', fontWeight: 500 }} type="number" placeholder="0" value={amount} onChange={e => setAmount(e.target.value)} onFocus={e => e.target.style.borderColor='var(--primary)'} onBlur={e => e.target.style.borderColor='var(--border)'} />
+            </div>
+          </div>
+
+          {/* Category + Date */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div>
+              <label style={labelStyle}>Category</label>
+              <input style={inputStyle} placeholder="e.g. Food, rent, pet care" value={category} onChange={e => setCategory(e.target.value)} onFocus={e => e.target.style.borderColor='var(--primary)'} onBlur={e => e.target.style.borderColor='var(--border)'} />
+            </div>
+            <div>
+              <label style={labelStyle}>Date</label>
+              <input style={inputStyle} type="date" value={date} onChange={e => setDate(e.target.value)} onFocus={e => e.target.style.borderColor='var(--primary)'} onBlur={e => e.target.style.borderColor='var(--border)'} />
+            </div>
+          </div>
+
+          {/* Paid by */}
+          <div>
+            <label style={labelStyle}>Paid by</label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {roommates.map(r => (
+                <button key={r.id} onClick={() => setPaidBy(r.id)} style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px',
+                  borderRadius: 8, border: `1.5px solid ${paidBy === r.id ? r.color : 'var(--border)'}`,
+                  background: paidBy === r.id ? r.bg : 'var(--surface)',
+                  color: paidBy === r.id ? r.color : 'var(--text2)',
+                  fontWeight: paidBy === r.id ? 600 : 400, fontSize: 13, cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}>
+                  <Avatar roommate={r} size={22} />
+                  {r.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Participants */}
+          <div>
+            <label style={labelStyle}>Split between</label>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {roommates.map(r => (
+                <button key={r.id} onClick={() => toggleParticipant(r.id)} style={{
+                  display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px',
+                  borderRadius: 8, border: `1.5px solid ${participants.includes(r.id) ? r.color : 'var(--border)'}`,
+                  background: participants.includes(r.id) ? r.bg : 'var(--surface)',
+                  color: participants.includes(r.id) ? r.color : 'var(--text3)',
+                  fontWeight: participants.includes(r.id) ? 600 : 400, fontSize: 13, cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}>
+                  {participants.includes(r.id) ? '✓' : '+'} {r.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Split method */}
+          <div>
+            <label style={labelStyle}>Split method</label>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {[['equal','⚖️ Equal'],['percentage','% Percentage'],['custom','💰 Custom']].map(([v,l]) => (
+                <button key={v} onClick={() => setSplitMethod(v)} style={{
+                  flex: 1, padding: '8px 4px', borderRadius: 8, fontSize: 12, fontWeight: 500,
+                  border: `1.5px solid ${splitMethod === v ? 'var(--primary)' : 'var(--border)'}`,
+                  background: splitMethod === v ? 'var(--primary-light)' : 'var(--surface)',
+                  color: splitMethod === v ? 'var(--primary)' : 'var(--text2)', cursor: 'pointer', transition: 'all 0.15s',
+                }}>{l}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Split inputs */}
+          {splitMethod !== 'equal' && (
+            <div style={{ background: 'var(--bg)', borderRadius: 10, padding: 14 }}>
+              <div style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 10 }}>
+                {splitMethod === 'percentage' ? `Total: ${totalPct.toFixed(1)}% (must be 100%)` : `Total: ${fmtINR(totalCustom)} (must be ${fmtINR(parseFloat(amount)||0)})`}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {participants.map(pid => {
+                  const r = getRoommate(roommates, pid);
+                  return (
+                    <div key={pid} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <Avatar roommate={r} size={26} />
+                      <span style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>{r?.name}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <input
+                          type="number" placeholder="0"
+                          value={splits[pid] || ''}
+                          onChange={e => setSplits(s => ({ ...s, [pid]: e.target.value }))}
+                          style={{ ...inputStyle, width: 90, textAlign: 'right', fontFamily: 'JetBrains Mono, monospace' }}
+                          onFocus={e => e.target.style.borderColor='var(--primary)'}
+                          onBlur={e => e.target.style.borderColor='var(--border)'}
+                        />
+                        <span style={{ fontSize: 13, color: 'var(--text3)', minWidth: 14 }}>
+                          {splitMethod === 'percentage' ? '%' : '₹'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Note */}
+          <div>
+            <label style={labelStyle}>Note (optional)</label>
+            <input style={inputStyle} placeholder="Any extra detail..." value={note} onChange={e => setNote(e.target.value)} onFocus={e => e.target.style.borderColor='var(--primary)'} onBlur={e => e.target.style.borderColor='var(--border)'} />
+          </div>
+
+          {error && (
+            <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--red-light)', color: 'var(--red)', fontSize: 13, fontWeight: 500 }}>
+              ⚠️ {error}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button onClick={onClose} style={{ flex: 1, padding: '12px', borderRadius: 10, border: '1.5px solid var(--border)', background: 'var(--surface)', fontSize: 14, fontWeight: 600, cursor: 'pointer', color: 'var(--text2)' }}>Cancel</button>
+            <button onClick={handleSubmit} style={{ flex: 2, padding: '12px', borderRadius: 10, border: 'none', background: 'var(--primary)', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer', transition: 'background 0.2s' }}
+              onMouseEnter={e => e.target.style.background='var(--primary-dark)'}
+              onMouseLeave={e => e.target.style.background='var(--primary)'}
+            >
+              ➕ Add Expense
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── EXPENSE ROW ───────────────────────────────────────────────────────────
+function ExpenseRow({ expense, roommates, onDelete }) {
+  const cat = getCat(expense.category);
+  const payer = getRoommate(roommates, expense.paidBy);
+  const share = expense.amount / Math.max((expense.participants || []).length, 1);
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0',
+      borderBottom: '1px solid var(--border)',
+    }}>
+      <div style={{
+        width: 40, height: 40, borderRadius: 10, flexShrink: 0,
+        background: cat.color + '18', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
+      }}>{cat.emoji}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{expense.desc}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3, flexWrap: 'wrap' }}>
+          <Avatar roommate={payer} size={16} />
+          <span style={{ fontSize: 11, color: cat.color, fontWeight: 500 }}>{cat.emoji} {cat.label}</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)' }}>
+            paid by <span style={{ color: payer?.color, fontWeight: 500 }}>{payer?.name}</span>
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--text3)' }}>· {expense.date}</span>
+          {expense.note && <span style={{ fontSize: 11, color: 'var(--text3)' }}>· {expense.note}</span>}
+        </div>
+      </div>
+      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text)', fontFamily: 'JetBrains Mono, monospace' }}>{fmtINR(expense.amount)}</div>
+        <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>
+          {fmtINR(share)}/person
+        </div>
+      </div>
+      <button onClick={() => onDelete(expense.id)} style={{ background: 'var(--red-light)', border: 'none', width: 28, height: 28, borderRadius: 6, color: 'var(--red)', cursor: 'pointer', fontSize: 14, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+    </div>
+  );
+}
+
+// ── MANAGE ROOMMATES MODAL ────────────────────────────────────────────────
+function RoommatesModal({ roommates, setRoommates, onClose }) {
+  const [name, setName] = useState('');
+
+  const addRoommate = () => {
+    if (!name.trim()) return;
+    const idx = roommates.length % ROOMMATE_COLORS.length;
+    setRoommates(r => [...r, { id: uid(), name: name.trim(), color: ROOMMATE_COLORS[idx], bg: ROOMMATE_BG[idx] }]);
+    setName('');
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16, backdropFilter: 'blur(4px)' }} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: 'var(--surface)', borderRadius: 16, width: '100%', maxWidth: 380, boxShadow: 'var(--shadow-md)' }}>
+        <div style={{ padding: '20px 24px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>Manage Roommates</div>
+          <button onClick={onClose} style={{ background: 'var(--bg)', border: 'none', width: 32, height: 32, borderRadius: 8, fontSize: 18, cursor: 'pointer' }}>×</button>
+        </div>
+        <div style={{ padding: '16px 24px 24px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1.5px solid var(--border)', fontSize: 14, outline: 'none' }}
+              placeholder="New roommate name"
+              value={name}
+              onChange={e => setName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addRoommate()}
+              onFocus={e => e.target.style.borderColor='var(--primary)'}
+              onBlur={e => e.target.style.borderColor='var(--border)'}
+            />
+            <button onClick={addRoommate} style={{ padding: '10px 16px', borderRadius: 8, background: 'var(--primary)', color: '#fff', border: 'none', fontWeight: 600, cursor: 'pointer', fontSize: 14 }}>Add</button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {roommates.map(r => (
+              <div key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', borderRadius: 10, background: r.bg, border: `1px solid ${r.color}30` }}>
+                <Avatar roommate={r} size={36} />
+                <span style={{ flex: 1, fontWeight: 500, color: r.color }}>{r.name}</span>
+                {roommates.length > 2 && (
+                  <button onClick={() => setRoommates(rs => rs.filter(x => x.id !== r.id))} style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', fontSize: 16 }}>✕</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────────────────
+function App() {
+  const [roommates, setRoommates] = useState(() => {
+    try { const s = localStorage.getItem('splitease_roommates'); return s ? JSON.parse(s) : DEFAULT_ROOMMATES; } catch { return DEFAULT_ROOMMATES; }
+  });
+  const [expenses, setExpenses] = useState(() => {
+    try { const s = localStorage.getItem('splitease_expenses'); return s ? JSON.parse(s) : DEFAULT_EXPENSES; } catch { return DEFAULT_EXPENSES; }
+  });
+  const [showAdd, setShowAdd] = useState(false);
+  const [showRoommates, setShowRoommates] = useState(false);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [filter, setFilter] = useState('all');
+  const [searchQ, setSearchQ] = useState('');
+
+  useEffect(() => {
+    try { localStorage.setItem('splitease_roommates', JSON.stringify(roommates)); } catch {}
+  }, [roommates]);
+  useEffect(() => {
+    try { localStorage.setItem('splitease_expenses', JSON.stringify(expenses)); } catch {}
+  }, [expenses]);
+
+  const addExpense = exp => { setExpenses(e => [exp, ...e]); setShowAdd(false); };
+  const deleteExpense = id => setExpenses(e => e.filter(x => x.id !== id));
+
+  const filteredExpenses = useMemo(() => {
+    let list = expenses;
+    if (filter !== 'all') list = list.filter(e => e.category === filter);
+    if (searchQ) list = list.filter(e => e.desc.toLowerCase().includes(searchQ.toLowerCase()));
+    return list;
+  }, [expenses, filter, searchQ]);
+
+  const TABS = [
+    { id: 'dashboard', label: '📊 Dashboard' },
+    { id: 'expenses',  label: '📋 Expenses' },
+    { id: 'settle',    label: '⚖️ Settle Up' },
+  ];
+
+  return (
+    <div style={{ minHeight: '100vh', background: 'var(--bg)' }}>
+      {/* Header */}
+      <header style={{
+        background: 'var(--surface)', borderBottom: '1px solid var(--border)',
+        position: 'sticky', top: 0, zIndex: 100,
+        boxShadow: '0 1px 0 var(--border)',
+      }}>
+        <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 20px', display: 'flex', alignItems: 'center', gap: 16, height: 60 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 10, background: 'var(--primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>✂️</div>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--primary)', lineHeight: 1 }}>SplitEase</div>
+              <div style={{ fontSize: 10, color: 'var(--text3)' }}>Roommate Expense Splitter</div>
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div style={{ display: 'flex', gap: 2, background: 'var(--bg)', borderRadius: 10, padding: 3, marginLeft: 'auto' }}>
+            {TABS.map(t => (
+              <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+                padding: '6px 14px', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 500,
+                background: activeTab === t.id ? 'var(--surface)' : 'transparent',
+                color: activeTab === t.id ? 'var(--primary)' : 'var(--text3)',
+                boxShadow: activeTab === t.id ? 'var(--shadow)' : 'none',
+                cursor: 'pointer', transition: 'all 0.15s', whiteSpace: 'nowrap',
+              }}>{t.label}</button>
+            ))}
+          </div>
+
+          <button onClick={() => setShowRoommates(true)} style={{ padding: '7px 12px', borderRadius: 8, border: '1.5px solid var(--border)', background: 'var(--surface)', fontSize: 12, fontWeight: 500, cursor: 'pointer', color: 'var(--text2)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            👥 {roommates.length} Roommates
+          </button>
+
+          <button onClick={() => setShowAdd(true)} style={{ padding: '7px 16px', borderRadius: 8, border: 'none', background: 'var(--primary)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+            ➕ Add Expense
+          </button>
+        </div>
+      </header>
+
+      {/* Body */}
+      <main style={{ maxWidth: 1100, margin: '0 auto', padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+        {/* DASHBOARD TAB */}
+        {activeTab === 'dashboard' && (<>
+          <SummaryCards expenses={expenses} roommates={roommates} />
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <CategoryChart expenses={expenses} />
+            <PersonChart expenses={expenses} roommates={roommates} />
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <BalancesPanel expenses={expenses} roommates={roommates} />
+            <SettlementPanel expenses={expenses} roommates={roommates} />
+          </div>
+        </>)}
+
+        {/* EXPENSES TAB */}
+        {activeTab === 'expenses' && (
+          <Card style={{ padding: 20 }}>
+            {/* Filter row */}
+            <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+              <input
+                placeholder="Search expenses..."
+                value={searchQ}
+                onChange={e => setSearchQ(e.target.value)}
+                style={{ flex: 1, minWidth: 160, padding: '8px 12px', borderRadius: 8, border: '1.5px solid var(--border)', fontSize: 13, outline: 'none' }}
+                onFocus={e => e.target.style.borderColor='var(--primary)'}
+                onBlur={e => e.target.style.borderColor='var(--border)'}
+              />
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                <button onClick={() => setFilter('all')} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 500, border: `1.5px solid ${filter==='all'?'var(--primary)':'var(--border)'}`, background: filter==='all'?'var(--primary-light)':'var(--surface)', color: filter==='all'?'var(--primary)':'var(--text3)', cursor: 'pointer' }}>All</button>
+                {[...new Set(expenses.map(e => e.category))].map(id => {
+                  const c = getCat(id);
+                  return (
+                  <button key={c.id} onClick={() => setFilter(c.id)} style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12, border: `1.5px solid ${filter===c.id?c.color:'var(--border)'}`, background: filter===c.id?c.color+'18':'var(--surface)', color: filter===c.id?c.color:'var(--text3)', cursor: 'pointer', fontWeight: filter===c.id?600:400 }}>
+                    {c.emoji} {c.label}
+                  </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Expense list */}
+            <div>
+              {filteredExpenses.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text3)' }}>
+                  <div style={{ fontSize: 40, marginBottom: 12 }}>🧾</div>
+                  <div style={{ fontSize: 15, fontWeight: 500 }}>No expenses yet</div>
+                  <div style={{ fontSize: 13, marginTop: 6 }}>Click "Add Expense" to log your first bill</div>
+                </div>
+              ) : filteredExpenses.map(e => (
+                <ExpenseRow key={e.id} expense={e} roommates={roommates} onDelete={deleteExpense} />
+              ))}
+            </div>
+
+            {filteredExpenses.length > 0 && (
+              <div style={{ marginTop: 16, padding: '10px 14px', background: 'var(--bg)', borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 13, color: 'var(--text2)' }}>{filteredExpenses.length} expense{filteredExpenses.length !== 1 ? 's' : ''}</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--primary)', fontFamily: 'JetBrains Mono, monospace' }}>{fmtINR(filteredExpenses.reduce((s,e) => s+e.amount, 0))} total</span>
+              </div>
+            )}
+          </Card>
+        )}
+
+        {/* SETTLE TAB */}
+        {activeTab === 'settle' && (<>
+          <BalancesPanel expenses={expenses} roommates={roommates} />
+          <SettlementPanel expenses={expenses} roommates={roommates} />
+
+          {/* Detailed per-person breakdown */}
+          <Card style={{ padding: 20 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Per-Person Breakdown</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+              {roommates.map(r => {
+                const paid = expenses.filter(e => e.paidBy === r.id).reduce((s,e) => s+e.amount, 0);
+                const involved = expenses.filter(e => (e.participants||[]).includes(r.id));
+                const owes = involved.reduce((s,e) => {
+                  const share = e.amount / Math.max((e.participants||[]).length, 1);
+                  return s + share;
+                }, 0);
+                const net = paid - owes;
+                return (
+                  <div key={r.id} style={{ background: r.bg, borderRadius: 12, padding: 16, border: `1px solid ${r.color}30` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                      <Avatar roommate={r} size={40} />
+                      <div>
+                        <div style={{ fontWeight: 600, color: r.color }}>{r.name}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text3)' }}>{involved.length} shared expenses</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {[
+                        { label: 'Total paid', val: paid, color: 'var(--green)' },
+                        { label: 'Total owes', val: owes, color: 'var(--red)' },
+                        { label: 'Net', val: net, color: net >= 0 ? 'var(--green)' : 'var(--red)' },
+                      ].map(item => (
+                        <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: 12, color: 'var(--text2)' }}>{item.label}</span>
+                          <span style={{ fontSize: 14, fontWeight: 700, color: item.color, fontFamily: 'JetBrains Mono, monospace' }}>
+                            {item.val >= 0 ? '' : '-'}{fmtINR(Math.abs(item.val))}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        </>)}
+      </main>
+
+      {showAdd && <AddExpenseModal roommates={roommates} onAdd={addExpense} onClose={() => setShowAdd(false)} />}
+      {showRoommates && <RoommatesModal roommates={roommates} setRoommates={setRoommates} onClose={() => setShowRoommates(false)} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
